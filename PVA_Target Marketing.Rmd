@@ -1,0 +1,432 @@
+---
+title: "PVA Target Marketing"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(recipes)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(caret)
+library(rsample)
+library(purrr)
+library(glmnet)
+library(lubridate)
+```
+
+## LOAD DATASET
+
+```{R}
+df1<-read_csv('~/Documents/Data mining/R/cup98LRN.txt')
+
+head(df1)
+```
+
+## Data Preprocessing: 
+
+A. Examine and remove some of the variables which will not be useful in predicting the target variable: 
+
+```{r}
+df1<-df1 %>% mutate(domainU = substr(DOMAIN, 1,1))
+df1<-df1 %>% mutate(domainSES = substr(DOMAIN, 2,2))
+
+d1<-paste(df1$ADATE_2, "01", sep = "")
+d1<-parse_date_time(d1,  "ymd")
+d2<-paste(df1$LASTDATE, "01", sep = "")
+d2<-parse_date_time(d2,  "ymd")
+df1<- df1 %>% mutate(totWeeks=as.duration(d2 %--% d1)/dweeks())
+
+#similarly, you can calculate the last promotion to gift time gap -- MAXADATE, ADATE_2
+
+b1<-paste(df1$MAXADATE, "01", sep = "")
+b1<-parse_date_time(b1,  "ymd")
+b2<-paste(df1$ADATE_2, "01", sep = "")
+b2<-parse_date_time(b2,  "ymd")
+df1<- df1 %>% mutate(totWeeks1=as.duration(b2 %--% b1)/dweeks())
+
+#average value of all responses, average value of response to all card promotions
+df1<-df1 %>% mutate(avgAllResp=if_else(NUMPROM>0, NGIFTALL/NUMPROM, 0),
+                                 avgCardResp=ifelse(CARDPROM>0,CARDGIFT/CARDPROM, 0)
+                                 )
+#Similarly, we have created a new variable including LASTGIFT, MAXRAMNT and also between MINRAMNT, MAXRAMNT.
+df1<-df1 %>% mutate(lastToMaxGiftRatio=if_else(MAXRAMNT>0,LASTGIFT/MAXRAMNT,0),
+       maxToMinGiftRatio=if_else(MINRAMNT>0, MAXRAMNT/MINRAMNT,0))
+                                
+varSet <- c("RECINHSE","RECP3","CLUSTER","AGE","INCOME","WEALTH1","HIT","WEALTH2","POP901","POP902","POP903","POP90C1","POP90C2","POP90C3","POP90C4","POP90C5","AGE901","AGE902","AGE903","AGE904","AGE905","AGE906","AGE907","CHIL1","CHIL2","CHIL3","HHP1","HHP2","HV1","HV2","HV3","HV4","MSA","ADI","DMA","IC1","IC2","IC3","IC4","IC5","HHAS1","HHAS2","HHAS3","HHAS4","PEC1","OEDC1","OEDC2","OEDC3","OEDC4","OEDC5","OEDC6","OEDC7","POBC1","POBC2","CARDPM12","NUMPRM12","MINRAMNT","MINRDATE","MAXRAMNT","LASTGIFT","TIMELAG","AVGGIFT","CONTROLN","TARGET_B","TARGET_D","HPHONE_D","RFA_2F","RFA_2A","CLUSTER2","domainU","domainSES","totWeeks", "totWeeks1","avgAllResp", "avgCardResp","lastToMaxGiftRatio","maxToMinGiftRatio" )
+ 
+df<- df1[, varSet]
+```
+As now we have finalized what variables to keep, let us now clean them.
+## Clean Dataset 
+```{r}
+df<- df %>% mutate(RECINHSE=if_else(RECINHSE=='X', "1", "0", "0"))
+df<- df %>% mutate(RECP3=if_else(RECP3=='X', "1", "0", "0"))
+
+
+df$AGE<- replace_na(df$AGE, median(df$AGE, na.rm = TRUE))
+df$MSA<- replace_na(df$MSA, median(df$MSA, na.rm = TRUE))
+df$ADI<- replace_na(df$ADI, median(df$ADI, na.rm = TRUE))
+df$DMA<- replace_na(df$DMA, median(df$DMA, na.rm = TRUE))
+df$INCOME<- replace_na(df$INCOME, median(df$INCOME, na.rm = TRUE))
+df$TIMELAG<- replace_na(df$TIMELAG, median(df$TIMELAG, na.rm = TRUE))
+df$WEALTH1<- replace_na(df$WEALTH1, median(df$WEALTH1, na.rm = TRUE))
+df$WEALTH2<- replace_na(df$WEALTH2, median(df$WEALTH2, na.rm = TRUE))
+
+#df$GENDER[which(is.na(df$GENDER))]="U"
+
+```
+
+## Check if any NA's are left: 
+```{r}
+colSums(is.na(df))[colSums(is.na(df))>0] 
+df$CLUSTER<- as.numeric(df$CLUSTER)
+df$CLUSTER<- replace_na(df$CLUSTER, median(df$CLUSTER, na.rm = TRUE))
+df$CLUSTER2<- replace_na(df$CLUSTER2, median(df$CLUSTER2, na.rm = TRUE))
+glimpse(df1$DOMAIN)
+glimpse(df1$domainU)
+glimpse(df$domainSES)
+df$domainU[which(is.na(df$domainU))]="missing"
+df$domainSES[which(is.na(df$domainSES))]="5"
+colSums(is.na(df))[colSums(is.na(df))>0]
+summary(df$domainSES)
+df <- df %>% mutate_if(is.character, as.factor)
+
+make_factor<-c("INCOME","WEALTH1","WEALTH2","TARGET_B","HPHONE_D","RFA_2A" )
+df<- df %>% mutate_at(make_factor,as.factor)
+
+```
+Split data into training, test subsets,  and then balance the training data
+```{r}
+pvaSplit<-initial_split(df, prop=0.7)
+pvaTrain<-training(pvaSplit)
+pvaTest<-testing(pvaSplit)
+
+library(ROSE)
+
+us_pvaTrain <- ovun.sample(TARGET_B ~., data=as.data.frame(pvaTrain), na.action = na.pass, method = "under", p=0.2)$data
+us_pvaTrain %>% group_by(TARGET_B) %>% count()
+
+os_pvaTrain <- ovun.sample(TARGET_B ~., data=as.data.frame(pvaTrain), na.action = na.pass, method = "over", p=0.2)$data
+os_pvaTrain %>% group_by(TARGET_B) %>% count()
+
+bs_pvaTrain <- ovun.sample(TARGET_B ~., data=as.data.frame(pvaTrain), na.action = na.pass, method = "both", p=0.2)$data
+bs_pvaTrain %>% group_by(TARGET_B) %>% count()
+
+summary(bs_pvaTrain$domainU)
+```
+## Summarise the variables
+```{r}
+which(lapply(df,class)=="factor")
+which(lapply(df,class)=="numeric")
+which(lapply(df,class)=="character")
+lapply(df,class)
+summary(df)
+```
+
+
+
+# Random forest model 
+```{r}
+library(ranger)
+
+
+rf_m <- ranger(TARGET_B ~., data=bs_pvaTrain %>% select(-TARGET_D), num.trees=200, probability = TRUE, importance='permutation')
+importance(rf_m) %>% View()
+hist(importance(rf_m))
+rfm_sc_Trn<-predict(rf_m, bs_pvaTrain)$predictions
+auc(as.numeric(as.character(bs_pvaTrain$TARGET_B)), rfm_sc_Trn[,2])
+
+rfm_sc_Tst<-predict(rf_m, pvaTest)$predictions
+auc(as.numeric(as.character(pvaTest$TARGET_B)), rfm_sc_Tst[,2])
+rf_m
+```
+# GBM: Boosted trees
+```{r}
+x<-data.frame(bs_pvaTrain %>% select( -TARGET_D))
+```
+
+
+# Glm: Logistic Regression
+```{r}
+m2<-glm(TARGET_B~.,x,family="binomial")
+
+summary(m2)
+
+glm_pred<-predict(m2, bs_pvaTrain)
+
+glm_train_scores<- exp(glm_pred)/(1+exp(glm_pred))
+glm_pred_test<-predict(m2, pvaTest)
+glm_test_scores<- exp(glm_pred_test)/(1+exp(glm_pred_test))
+
+
+summary(bs_pvaTrain$GENDER)
+summary(pvaTest$GENDER)
+
+```
+## Performance Evaluation
+Lets find the optimal cutoff value for the test data:
+#1. Glm model
+```{r}
+
+
+prPerf <- data.frame(glm_test_scores)
+prPerf <- cbind(prPerf, TARGET_B=pvaTest$TARGET_B)
+prPerf <- prPerf[order(-glm_test_scores) ,]  #sort
+PROFITVAL <- 12.32
+COSTVAL <- -0.68
+prPerf$profit <- ifelse(prPerf$TARGET_B == '1', PROFITVAL, COSTVAL)
+prPerf$cumProfit <- cumsum(prPerf$profit)
+plot(prPerf$glm_test_scores, prPerf$cumProfit)
+
+```
+#2.Rf model
+```{r}
+
+
+
+prPerf_rf <- data.frame(rfm_sc_Tst[,2])
+prPerf_rf <- cbind(prPerf_rf, TARGET_B=pvaTest$TARGET_B)
+prPerf_rf <- prPerf_rf[order(-rfm_sc_Tst[,2]) ,]  #sort
+PROFITVAL <- 12.32
+COSTVAL <- -0.68
+prPerf_rf$profit <- ifelse(prPerf_rf$TARGET_B == '1', PROFITVAL, COSTVAL)
+prPerf_rf$cumProfit <- cumsum(prPerf_rf$profit)
+plot(prPerf_rf[,1], prPerf_rf$cumProfit)
+
+```
+# Combine both in one graph
+```{r}
+p = ggplot() + 
+  geom_line(data = prPerf, aes(x = prPerf[,1], y =prPerf$cumProfit ), colour = "blue") +
+  geom_line(data = prPerf_rf, aes(x = prPerf_rf[,1], y =prPerf_rf$cumProfit ), colour = "red") +
+  xlab('Scores (probabilties)') +
+  ylab('Cummulative Profit')
+
+print(p)
+
+```
+# Glm for train data
+```{r}
+prPerf_train_glm <- data.frame(glm_train_scores)
+prPerf_train_glm <- cbind(prPerf_train_glm, TARGET_B=bs_pvaTrain$TARGET_B)
+prPerf_train_glm <- prPerf_train_glm[order(-glm_train_scores) ,]  #sort
+PROFITVAL <- 12.32
+COSTVAL <- -0.68
+prPerf_train_glm$profit <- ifelse(prPerf_train_glm$TARGET_B == '1', PROFITVAL, COSTVAL)
+prPerf_train_glm$cumProfit <- cumsum(prPerf_train_glm$profit)
+plot(prPerf_train_glm$glm_train_scores, prPerf_train_glm$cumProfit)
+
+```
+
+Now we will calculate predictions based on our best model i.e. ggbm with the cutoff value of obtained form above
+```{r}
+
+prPerf_train_glm$Glm_predictions_train<-if_else(prPerf_train_glm$glm_train_scores>=0.061, 0,1)
+
+confusionMatrix(as.factor(prPerf_train_glm$Glm_predictions_train),as.factor(prPerf_train_glm$TARGET_B),positive = "0")
+
+#install.packages('e1071')
+# for test data
+prPerf$Glm_predictions_test<-if_else(prPerf$glm_test_scores>=0.2, 1,0)
+confusionMatrix(as.factor(prPerf$Glm_predictions),as.factor(prPerf$TARGET_B),positive = "0")
+```
+
+
+Create a sub dataset without the TARGET_D and including the glm_scores from the above model as one of the variables. 
+```{r}
+xx_train<-bs_pvaTrain
+
+xx_train$Prob_target_B<-glm_train_scores
+xx_train$Pred_target_B<-prPerf_train_glm$Glm_predictions_train 
+
+
+#test data
+xx_test<-pvaTest
+
+xx_test$Prob_target_B<-glm_test_scores
+xx_test$Pred_target_B<-prPerf$Glm_predictions_test 
+
+```
+
+## Fit a model on this data set :
+
+# 1. OLS
+```{r}
+lm2<-lm(TARGET_D~. , data = xx_train)
+summary(lm2)
+```
+
+```{r}
+lm2_tr_pred<-data.frame(pred=predict(lm2, xx_train), true=xx_train$TARGET_D)
+lm2_ts_pred<-data.frame(pred=predict(lm2, xx_test), true=xx_test$TARGET_D)
+
+# mean absolute error
+
+lm2_tr_pred$err<- abs(lm2_tr_pred$pred - lm2_tr_pred$true)
+mean(lm2_tr_pred$err)
+lm2_ts_pred$err<- abs(lm2_ts_pred$pred - lm2_ts_pred$true)
+mean(lm2_ts_pred$err)
+
+```
+
+
+# 2. Random Forest
+```{r}
+as.numeric(names(xx_train))
+rfm2 <- ranger(TARGET_D ~., data=xx_train, num.trees=200, importance = 'impurity')
+
+importance(rfm2) %>% View
+
+
+rfm2_tr_pred<-data.frame(pred=predict(rfm2, xx_train)$predictions, true=xx_train$TARGET_D)
+
+rfm2_ts_pred<-data.frame(pred=predict(rfm2, xx_test)$predictions, true=xx_test$TARGET_D)
+
+
+rfm2_tr_pred$err<- abs(rfm2_tr_pred$pred - rfm2_tr_pred$true)
+mean(rfm2_tr_pred$err)
+```
+
+
+```{r}
+rfm2_ts_pred$err<- abs(rfm2_ts_pred$pred - rfm2_ts_pred$true)
+mean(rfm2_ts_pred$err)
+```
+
+# 3. GBM
+
+```{r}
+#install.packages('gbm')
+
+library(gbm)
+
+#xx_train1<-xx_train %>% select(-c('TARGET_B','totWeeks1', 'Pred_target_B'))
+
+gbm2= gbm(TARGET_D ~ ., data=xx_train,distribution = "gaussian",
+  n.trees = 1000,
+  cv.folds = 5,
+  n.cores = NULL, # will use all cores by default
+  verbose = FALSE)
+
+gbm2_tr_pred<-data.frame(pred=predict.gbm(gbm2, xx_train, type='link'), true=xx_train$TARGET_D)
+gbm2_ts_pred<-data.frame(pred=predict.gbm(gbm2, xx_test, type='link'), true=xx_test$TARGET_D)
+
+summary(gbm2)
+sqrt(min(gbm2$cv.error))
+gbm.perf(gbm2, method = "cv")
+
+gbm2_tr_pred$err<- abs(gbm2_tr_pred$pred - gbm2_tr_pred$true)
+mean(gbm2_tr_pred$err)
+gbm2_ts_pred$err<- abs(gbm2_ts_pred$pred - gbm2_ts_pred$true)
+mean(gbm2_ts_pred$err)
+
+```
+## performance evaluation of the final models: 
+
+```{r}
+gbm2_tr_pred$pred<- gbm2_tr_pred$pred*glm_train_scores
+# sort it from high to low
+gbm2_tr_pred<- gbm2_tr_pred[order(-gbm2_tr_pred$pred),]
+gbm2_tr_pred$profit<- ifelse(gbm2_tr_pred$pred>= '0.68', PROFITVAL, COSTVAL)
+gbm2_tr_pred$cumProfit <- cumsum(gbm2_tr_pred$profit)
+plot(gbm2_tr_pred[,1], gbm2_tr_pred$cumProfit)
+```
+
+## New Data
+```{r}
+new1<-read_csv('~/Documents/Data mining/R/Assignment 2/pva_futureData_forScoring.csv')
+
+head(new1)
+```
+## Data Preprocessing: 
+
+A. Examine and remove some of the variables which will not be useful in predicting the target varible: 
+
+```{r}
+
+new1<-new1 %>% mutate(domainU = substr(DOMAIN, 1,1))
+new1<-new1 %>% mutate(domainSES = substr(DOMAIN, 2,2))
+
+d1<-paste(new1$ADATE_2, "01", sep = "")
+d1<-parse_date_time(d1,  "ymd")
+d2<-paste(new1$LASTDATE, "01", sep = "")
+d2<-parse_date_time(d2,  "ymd")
+new1<- new1 %>% mutate(totWeeks=as.duration(d2 %--% d1)/dweeks())
+
+#similarly, you can calculate the last promotion to gift time gap -- MAXADATE, ADATE_2
+
+b1<-paste(new1$MAXADATE, "01", sep = "")
+b1<-parse_date_time(b1,  "ymd")
+b2<-paste(new1$ADATE_2, "01", sep = "")
+b2<-parse_date_time(b2,  "ymd")
+new1<- new1 %>% mutate(totWeeks1=as.duration(b2 %--% b1)/dweeks())
+
+#average value of all responses, average value of response to all card promotions
+new1<-new1 %>% mutate(avgAllResp=if_else(NUMPROM>0, NGIFTALL/NUMPROM, 0),
+                                 avgCardResp=ifelse(CARDPROM>0,CARDGIFT/CARDPROM, 0)
+                                 )
+#Similarly, we have created a new variable including LASTGIFT, MAXRAMNT and also between MINRAMNT, MAXRAMNT.
+new1<-new1 %>% mutate(lastToMaxGiftRatio=if_else(MAXRAMNT>0,LASTGIFT/MAXRAMNT,0),
+       maxToMinGiftRatio=if_else(MINRAMNT>0, MAXRAMNT/MINRAMNT,0))
+                                
+varSet <- c("RECINHSE","RECP3","CLUSTER","AGE","INCOME","WEALTH1","HIT","WEALTH2","POP901","POP902","POP903","POP90C1","POP90C2","POP90C3","POP90C4","POP90C5","AGE901","AGE902","AGE903","AGE904","AGE905","AGE906","AGE907","CHIL1","CHIL2","CHIL3","HHP1","HHP2","HV1","HV2","HV3","HV4","MSA","ADI","DMA","IC1","IC2","IC3","IC4","IC5","HHAS1","HHAS2","HHAS3","HHAS4","PEC1","OEDC1","OEDC2","OEDC3","OEDC4","OEDC5","OEDC6","OEDC7","POBC1","POBC2","CARDPM12","NUMPRM12","MINRAMNT","MINRDATE","MAXRAMNT","LASTGIFT","TIMELAG","AVGGIFT","CONTROLN","HPHONE_D","RFA_2F","RFA_2A","CLUSTER2","domainU","domainSES","totWeeks", "totWeeks1","avgAllResp", "avgCardResp","lastToMaxGiftRatio","maxToMinGiftRatio" )
+ 
+new<- new1[, varSet]
+```
+As now we have finalized what variables to keep, let us now clean them.
+## Clean Dataset 
+```{r}
+new<- new %>% mutate(RECINHSE=if_else(RECINHSE=='X', "1", "0", "0"))
+new<- new %>% mutate(RECP3=if_else(RECP3=='X', "1", "0", "0"))
+
+
+new$AGE<- replace_na(new$AGE, median(new$AGE, na.rm = TRUE))
+new$MSA<- replace_na(new$MSA, median(new$MSA, na.rm = TRUE))
+new$ADI<- replace_na(new$ADI, median(new$ADI, na.rm = TRUE))
+new$DMA<- replace_na(new$DMA, median(new$DMA, na.rm = TRUE))
+new$INCOME<- replace_na(new$INCOME, median(new$INCOME, na.rm = TRUE))
+new$TIMELAG<- replace_na(new$TIMELAG, median(new$TIMELAG, na.rm = TRUE))
+new$WEALTH1<- replace_na(new$WEALTH1, median(new$WEALTH1, na.rm = TRUE))
+new$WEALTH2<- replace_na(new$WEALTH2, median(new$WEALTH2, na.rm = TRUE))
+
+
+```
+
+## Check if any NA's are left: 
+```{r}
+colSums(is.na(new))[colSums(is.na(new))>0] 
+new$CLUSTER<- as.numeric(new$CLUSTER)
+new$CLUSTER<- replace_na(new$CLUSTER, median(new$CLUSTER, na.rm = TRUE))
+new$CLUSTER2<- replace_na(new$CLUSTER2, median(new$CLUSTER2, na.rm = TRUE))
+glimpse(new1$DOMAIN)
+glimpse(new1$domainU)
+glimpse(new$domainSES)
+new$domainU[which(is.na(new$domainU))]="missing"
+new$domainSES[which(is.na(new$domainSES))]="5"
+colSums(is.na(new))[colSums(is.na(new))>0]
+summary(new$domainSES)
+new <- new %>% mutate_if(is.character, as.factor)
+
+make_factor<-c("INCOME","WEALTH1","WEALTH2","HPHONE_D","RFA_2A" )
+new<- new %>% mutate_at(make_factor,as.factor)
+
+
+
+```
+## Predictions:
+```{r}
+summary(new$domainU)
+glm_pred_new<-predict(m2, new)
+glm_tr_scores_new<- exp(glm_pred_new)/(1+exp(glm_pred_new))
+new_glm_table <- data.frame(glm_tr_scores_new)
+ 
+new_glm_table$predicted_TARGET_B<- if_else(new_glm_table>=0.5, 1,0)
+```
+
+
